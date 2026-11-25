@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium, expect } from '@playwright/test';
@@ -341,6 +341,117 @@ try {
   await noHorizontalScroll();
   await page.getByRole('button', { name: /К архиву/ }).click();
 
+  async function openBackups() {
+    await button('Настройки').click();
+    await button('Резервные копии').click();
+    await expect(page.getByRole('heading', { name: 'Резервные копии', exact: true })).toBeVisible();
+    await noHorizontalScroll();
+  }
+  const fixturePassword = 'учебная фраза только для теста';
+  await expect(page.getByRole('complementary', { name: 'Напоминание о резервной копии' })).toBeVisible();
+  await page.evaluate(() => Object.defineProperty(navigator, 'canShare', { value: () => false, configurable: true }));
+  await openBackups();
+  await browser.setOffline(true);
+  await label('Пароль новой копии').fill(fixturePassword);
+  await label('Повторите пароль').fill(`${fixturePassword} 2`);
+  await button('Подготовить файл').click();
+  await expect(page.getByRole('alert')).toHaveText('Пароли не совпадают.');
+  await expect(button('Скачать копию')).toHaveCount(0);
+  await label('Повторите пароль').fill(fixturePassword);
+  await button('Подготовить файл').click();
+  await expect(button('Скачать копию')).toBeEnabled();
+  await expect(button('Поделиться')).toHaveCount(0);
+  await expect(page.getByText('Передача через системное меню недоступна. Скачайте файл.')).toBeVisible();
+  const [download] = await Promise.all([page.waitForEvent('download'), button('Скачать копию').click()]);
+  const bytes = await readFile(await download.path());
+  assert.ok(!bytes.includes(Buffer.from('Учебная заморозка')));
+  assert.ok(!bytes.includes(Buffer.from(fixturePassword)));
+  const file = { name: download.suggestedFilename(), mimeType: 'application/octet-stream', buffer: bytes };
+  await browser.setOffline(false);
+  await page.getByRole('button', { name: /К настройкам/ }).click();
+  const sourcePage = page;
+  const cleanBrowser = await chromium.launch({ channel: process.argv[2] });
+  try {
+    const cleanContext = await cleanBrowser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+    page = await cleanContext.newPage();
+    page.on('pageerror', error => errors.push(error.message));
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'canShare', { value: ({ files }) => files.length === 1 });
+      Object.defineProperty(navigator, 'share', { value: async ({ files }) => {
+        window.testSharedFile = { name: files[0].name, type: files[0].type, text: await files[0].text() };
+        if (!window.testShareResolves) throw new DOMException('Canceled', 'AbortError');
+      } });
+    });
+    await page.goto(url);
+    await expect(page.getByText('Пока нет клиентов')).toBeVisible();
+    await add('Только на новом телефоне');
+    await openBackups();
+    await label('Пароль новой копии').fill(fixturePassword);
+    await label('Повторите пароль').fill(fixturePassword);
+    await button('Подготовить файл').click();
+    await button('Поделиться').click();
+    await expect(page.getByText(/Передача отменена/)).toBeVisible();
+    await expect(button('Скачать копию')).toBeEnabled();
+    await expect(button('Отметить копию сохранённой')).toHaveCount(0);
+    await page.evaluate(() => { window.testShareResolves = true; });
+    await button('Поделиться').click();
+    await expect(page.getByText(/Журнал не может подтвердить доставку/)).toBeVisible();
+    assert.equal(await page.evaluate(() => localStorage.getItem('podhod.backup-saved-at')), null);
+    const shared = await page.evaluate(() => window.testSharedFile);
+    assert.match(shared.name, /\.txt$/);
+    assert.equal(shared.type, 'text/plain');
+    assert.ok(!shared.text.includes('Только на новом телефоне'));
+    await button('Отметить копию сохранённой').click();
+    await expect(page.getByText('Копия отмечена как сохранённая.')).toBeVisible();
+    await cleanContext.setOffline(true);
+    async function checkFile(input, password) {
+      await label('Файл резервной копии').setInputFiles(input);
+      await label('Пароль для восстановления').fill(password);
+      await button('Проверить копию').click();
+    }
+    await checkFile(file, 'неверная учебная фраза');
+    await expect(page.getByRole('alert')).toBeVisible();
+    await expect(button('Заменить журнал')).toHaveCount(0);
+    await checkFile({ ...file, buffer: bytes.subarray(0, Math.floor(bytes.length / 2)) }, fixturePassword);
+    await expect(page.getByRole('alert')).toBeVisible();
+    await expect(button('Заменить журнал')).toHaveCount(0);
+    await page.getByRole('button', { name: /К настройкам/ }).click();
+    await page.getByRole('button', { name: /К списку/ }).click();
+    await expect(checkbox('Только на новом телефоне')).toBeVisible();
+    await expect(page.locator('html')).toHaveCSS('color-scheme', 'light');
+    await openBackups();
+    await checkFile(file, fixturePassword);
+    await expect(page.getByRole('heading', { name: /^Копия от / })).toBeVisible();
+    await expect(page.getByText(/Клиентов:.*в архиве:/)).toBeVisible();
+    await expect(page.getByText(/могут вернуться/)).toBeVisible();
+    await expect(button('Заменить журнал')).toBeDisabled();
+    await button('Отменить восстановление').click();
+    await expect(button('Заменить журнал')).toHaveCount(0);
+    await checkFile(file, fixturePassword);
+    await page.getByRole('checkbox', { name: 'Подтверждаю полную замену журнала' }).check();
+    await button('Заменить журнал').click();
+    await expect(page.getByText('Журнал восстановлен из резервной копии.')).toBeVisible();
+    await expect(checkbox('Только на новом телефоне')).toHaveCount(0);
+    await cleanContext.setOffline(false);
+    await page.reload();
+    await expect(search()).toBeVisible();
+    await expect(page.locator('html')).toHaveCSS('color-scheme', 'dark');
+    await expect(search()).toHaveCSS('border-radius', '0px');
+    await button('Архив').click();
+    await open('Учебная заморозка');
+    await expect(freeze()).toContainText('08.09.2026');
+    await expect(subscription()).toContainText('Следующая оплата: 02.11.2026');
+    assert.deepEqual(await payments(), originalPayments);
+  } finally {
+    await cleanBrowser.close();
+    page = sourcePage;
+  }
+
+  await setDate('2026-09-14');
+  const reminder = page.getByRole('complementary', { name: 'Напоминание о резервной копии' });
+  await expect(reminder).toHaveCount(0);
+  await setDate('2026-09-15');
+  await expect(reminder).toBeVisible();
   await page.setViewportSize({ width: 1200, height: 850 });
   await button('Настройки').click();
   await expect(theme()).toHaveValue('dark');
@@ -349,7 +460,7 @@ try {
   await expect(corners()).not.toHaveCSS('border-radius', '0px');
   await expect(page.locator('html')).toHaveCSS('color-scheme', 'dark');
   assert.deepEqual(errors, []);
-  console.log('PASS: Chromium 390×844, клиенты, оформление, тарифы, взносы, заморозка, ранний возврат и сохранение после перезапуска.');
+  console.log('PASS: Chromium 390×844, экспорт и офлайн-восстановление в новом профиле, сценарии Web Share и напоминание через семь дней.');
 } finally {
   try { await browser?.close(); } finally {
     server?.httpServer.close();

@@ -1,28 +1,25 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
-import { createClient, deleteClients, listClients, listTariffs, matchesClient, saveTariff, setArchived, setTariffEnabled, updateBilling } from './clients';
-import type { Client, ClientFields } from './clients';
+import { createClient, deleteClients, matchesClient, readJournal, replaceJournal, saveAppearance, saveTariff, setArchived, setTariffEnabled, updateBilling } from './clients';
+import type { Appearance, Client, ClientFields, JournalSnapshot } from './clients';
 import { activeFreeze, billingBalance, compareDue, dueStatus, localToday } from './billing';
 import type { Tariff } from './billing';
 import { BillingCard, EnrollmentFields, Tariffs, dateLabel, enrollmentOf, initialEnrollment, money } from './billing-ui';
 import type { EnrollmentForm } from './billing-ui';
+import { BackupPanel } from './backup-ui';
 import './styles.css';
 
 const emptyFields: ClientFields = { firstName: '', lastName: '', phone: '', notes: '' };
 const nameOf = (client: Client) => [client.firstName, client.lastName].filter(Boolean).join(' ') || 'Без имени';
 const byTariffName = (a: Tariff, b: Tariff) => a.name.localeCompare(b.name, 'ru');
-type Screen = { kind: 'list' } | { kind: 'new' } | { kind: 'card'; client: Client } | { kind: 'settings' };
-type Appearance = { theme: 'light' | 'dark'; corners: 'rounded' | 'square' };
-const appearanceKey = 'podhod.appearance';
+const backupDateKey = 'podhod.backup-saved-at';
+const backupInterval = 7 * 24 * 60 * 60 * 1000;
+type Screen = { kind: 'list' } | { kind: 'new' } | { kind: 'card'; client: Client } | { kind: 'settings' } | { kind: 'backup' };
 
-function readAppearance(): Appearance {
-  try {
-    const saved: Partial<Appearance> | null = JSON.parse(localStorage.getItem(appearanceKey) ?? 'null');
-    return { theme: saved?.theme === 'dark' ? 'dark' : 'light', corners: saved?.corners === 'square' ? 'square' : 'rounded' };
-  } catch {
-    return { theme: 'light', corners: 'rounded' };
-  }
+function readBackupDate(): number {
+  try { return Number(localStorage.getItem(backupDateKey)); }
+  catch { return 0; }
 }
 
 function DeleteDialog({ clients, busy, error, onCancel, onConfirm }: {
@@ -72,7 +69,9 @@ function App() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [today, setToday] = useState(localToday);
-  const [appearance, setAppearance] = useState(readAppearance);
+  const [backupDate, setBackupDate] = useState(readBackupDate);
+  const [now, setNow] = useState(Date.now);
+  const [appearance, setAppearance] = useState<Appearance>({ theme: 'light', corners: 'rounded' });
   const errorBanner = useRef<HTMLParagraphElement>(null);
 
   useLayoutEffect(() => {
@@ -80,25 +79,28 @@ function App() {
     document.documentElement.dataset.corners = appearance.corners;
   }, [appearance]);
 
+  function showJournal(snapshot: JournalSnapshot) {
+    setTariffs([...snapshot.tariffs].sort(byTariffName));
+    setClients(snapshot.clients);
+    setAppearance(snapshot.appearance);
+  }
+
   function changeAppearance(next: Appearance) {
-    setAppearance(next);
-    try { localStorage.setItem(appearanceKey, JSON.stringify(next)); }
-    catch { setNotice('Оформление изменено для этой вкладки, но браузер не позволил сохранить выбор.'); }
+    void write(async () => {
+      await saveAppearance(next);
+      setAppearance(next);
+    }, 'Оформление сохранено.');
   }
 
   async function load() {
     setError('');
-    try {
-      const [nextClients, nextTariffs] = await Promise.all([listClients(), listTariffs()]);
-      setTariffs(nextTariffs.sort(byTariffName));
-      setClients(nextClients);
-    }
+    try { showJournal(await readJournal()); }
     catch { setError('Не удалось открыть журнал. Проверьте, доступно ли хранилище браузера.'); }
   }
   useEffect(() => { void load(); }, []);
   useEffect(() => { if (error) errorBanner.current?.focus(); }, [error]);
   useEffect(() => {
-    const refreshToday = () => setToday(localToday());
+    const refreshToday = () => { setToday(localToday()); setNow(Date.now()); };
     window.addEventListener('focus', refreshToday);
     document.addEventListener('visibilitychange', refreshToday);
     return () => {
@@ -112,6 +114,19 @@ function App() {
     (a, b) => (archive ? 0 : compareDue(a.billing, b.billing, today)) || nameOf(a).localeCompare(nameOf(b), 'ru'),
   );
   const chosen = visible.filter(client => selected.includes(client.id));
+  const backupDue = !Number.isFinite(backupDate) || backupDate <= 0 || backupDate > now || now - backupDate >= backupInterval;
+
+  function openBackups() {
+    setError(''); setNotice(''); setScreen({ kind: 'backup' });
+  }
+
+  function rememberBackup() {
+    const savedAt = Date.now();
+    setBackupDate(savedAt);
+    setNow(savedAt);
+    try { localStorage.setItem(backupDateKey, String(savedAt)); }
+    catch { /* The reminder may reappear on the next launch. */ }
+  }
 
   function switchList(nextArchive: boolean) {
     setArchive(nextArchive);
@@ -187,6 +202,10 @@ function App() {
             setError(''); setNotice(''); setScreen({ kind: 'settings' });
           }}>Настройки</button>
         </nav>
+        {clients !== null && backupDue && <aside className="notice" aria-label="Напоминание о резервной копии">
+          <p>Сделайте резервную копию журнала и сохраните файл вне этого браузера.</p>
+          <button type="button" disabled={busy} onClick={openBackups}>Создать резервную копию</button>
+        </aside>}
         <div className="section-heading">
           <h1>{archive ? 'Архив' : 'Клиенты'}</h1>
           {!archive && clients && <button type="button" className="primary" disabled={busy} onClick={() => {
@@ -240,8 +259,8 @@ function App() {
       </>}
 
       {screen.kind !== 'list' && <button type="button" className="back" disabled={busy} onClick={() => {
-        setScreen({ kind: 'list' }); setError(''); setNotice('');
-      }}>← {archive ? 'К архиву' : 'К списку'}</button>}
+        setScreen({ kind: screen.kind === 'backup' ? 'settings' : 'list' }); setError(''); setNotice('');
+      }}>← {screen.kind === 'backup' ? 'К настройкам' : archive ? 'К архиву' : 'К списку'}</button>}
 
       {screen.kind === 'new' && <>
         <h1>Новый клиент</h1>
@@ -282,14 +301,15 @@ function App() {
 
       {screen.kind === 'settings' && <>
         <h1>Настройки</h1>
+        <button type="button" disabled={busy || clients === null} onClick={openBackups}>Резервные копии</button>
         <section className="panel billing-panel" aria-labelledby="appearance-title">
           <h2 id="appearance-title">Оформление</h2>
           <label htmlFor="appearance-theme">Тема</label>
-          <select id="appearance-theme" value={appearance.theme} onChange={event => {
+          <select id="appearance-theme" disabled={busy || clients === null} value={appearance.theme} onChange={event => {
             changeAppearance({ ...appearance, theme: event.target.value === 'dark' ? 'dark' : 'light' });
           }}><option value="light">Светлая</option><option value="dark">Тёмная</option></select>
           <label htmlFor="appearance-corners">Углы</label>
-          <select id="appearance-corners" value={appearance.corners} onChange={event => {
+          <select id="appearance-corners" disabled={busy || clients === null} value={appearance.corners} onChange={event => {
             changeAppearance({ ...appearance, corners: event.target.value === 'square' ? 'square' : 'rounded' });
           }}><option value="rounded">Скруглённые</option><option value="square">Прямые</option></select>
         </section>
@@ -299,6 +319,13 @@ function App() {
           rememberTariff(await setTariffEnabled(tariff.id, !tariff.enabled));
         }, tariff.enabled ? 'Тариф отключён.' : 'Тариф включён.')} />}
       </>}
+
+      {screen.kind === 'backup' && <BackupPanel busy={busy} onBusy={setBusy} onSaved={rememberBackup} onRestore={async snapshot => {
+        await replaceJournal(snapshot);
+        showJournal(snapshot);
+        switchList(false);
+        setNotice('Журнал восстановлен из резервной копии.');
+      }} />}
 
       {pendingDelete.length > 0 && <DeleteDialog clients={pendingDelete} busy={busy} error={error}
         onCancel={() => { setPendingDelete([]); setError(''); }} onConfirm={remove} />}

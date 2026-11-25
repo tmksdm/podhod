@@ -443,7 +443,7 @@ describe('тарифы', () => {
 });
 
 describe('версия базы и миграция', () => {
-  it('создаёт версию 2 и переносит карточки из версии 1', async () => {
+  it('обновляет схему и переносит карточки из версии 1', async () => {
     const seed = { ...fields(), id: 'old-client', archived: false };
     const versionOne = await openDatabaseVersion(1, (database) => {
       database.createObjectStore('clients', { keyPath: 'id' });
@@ -463,8 +463,8 @@ describe('версия базы и миграция', () => {
     await expect(listTariffs()).resolves.toEqual([tariff]);
 
     const current = await openDatabaseVersion(undefined);
-    expect(current.version).toBe(3);
-    current.close();
+    try { expect(current.version).toBe(4); }
+    finally { current.close(); }
   });
 });
 

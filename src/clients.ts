@@ -21,10 +21,27 @@ export type Client = ClientFields & {
   billing?: Billing;
 };
 
+export type Appearance = {
+  theme: 'light' | 'dark';
+  corners: 'rounded' | 'square';
+};
+
+export type JournalSnapshot = {
+  clients: Client[];
+  tariffs: Tariff[];
+  appearance: Appearance;
+};
+
 const DATABASE_NAME = 'podhod';
-const DATABASE_VERSION = 3;
+const DATABASE_VERSION = 4;
 const CLIENT_STORE = 'clients';
 const TARIFF_STORE = 'tariffs';
+const SETTINGS_STORE = 'settings';
+const APPEARANCE_RECORD_ID = 'appearance';
+const LEGACY_APPEARANCE_KEY = 'podhod.appearance';
+const DEFAULT_APPEARANCE: Appearance = { theme: 'light', corners: 'rounded' };
+
+type AppearanceRecord = Appearance & { id: typeof APPEARANCE_RECORD_ID };
 
 let recordSequence = 0;
 
@@ -42,6 +59,52 @@ function newRecordId(prefix: string): string {
   return `${prefix}-${stamp}-${sequence}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function normalizeAppearance(value: unknown): Appearance {
+  if (typeof value !== 'object' || value === null) {
+    return { ...DEFAULT_APPEARANCE };
+  }
+  const candidate = value as { theme?: unknown; corners?: unknown };
+  return {
+    theme: candidate.theme === 'dark' ? 'dark' : 'light',
+    corners: candidate.corners === 'square' ? 'square' : 'rounded',
+  };
+}
+
+function readLegacyAppearance(): Appearance | null {
+  try {
+    if (typeof localStorage === 'undefined') {
+      return null;
+    }
+    const raw = localStorage.getItem(LEGACY_APPEARANCE_KEY);
+    if (raw === null) {
+      return null;
+    }
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) {
+      return null;
+    }
+    return normalizeAppearance(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function migrateLegacyAppearance(transaction: IDBTransaction | null): void {
+  if (transaction === null) {
+    return;
+  }
+  const appearance = readLegacyAppearance();
+  if (appearance === null) {
+    return;
+  }
+  const record: AppearanceRecord = { id: APPEARANCE_RECORD_ID, ...appearance };
+  try {
+    transaction.objectStore(SETTINGS_STORE).put(record);
+  } catch {
+    return;
+  }
+}
+
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
@@ -54,6 +117,10 @@ function openDatabase(): Promise<IDBDatabase> {
       }
       if (!database.objectStoreNames.contains(TARIFF_STORE)) {
         database.createObjectStore(TARIFF_STORE, { keyPath: 'id' });
+      }
+      if (!database.objectStoreNames.contains(SETTINGS_STORE)) {
+        database.createObjectStore(SETTINGS_STORE, { keyPath: 'id' });
+        migrateLegacyAppearance(request.transaction);
       }
     };
 
@@ -343,6 +410,74 @@ export async function listTariffs(): Promise<Tariff[]> {
     async (transaction) => {
       const request = transaction.objectStore(TARIFF_STORE).getAll() as IDBRequest<Tariff[]>;
       return requestResult(request);
+    },
+  ));
+}
+
+export async function readJournal(): Promise<JournalSnapshot> {
+  return withDatabase(database => runTransaction(
+    database,
+    [CLIENT_STORE, TARIFF_STORE, SETTINGS_STORE],
+    'readonly',
+    async (transaction) => {
+      const clientRequest = transaction.objectStore(CLIENT_STORE).getAll() as IDBRequest<Client[]>;
+      const tariffRequest = transaction.objectStore(TARIFF_STORE).getAll() as IDBRequest<Tariff[]>;
+      const appearanceRequest = transaction
+        .objectStore(SETTINGS_STORE)
+        .get(APPEARANCE_RECORD_ID) as IDBRequest<AppearanceRecord | undefined>;
+      const [clients, tariffs, appearanceRecord] = await Promise.all([
+        requestResult(clientRequest),
+        requestResult(tariffRequest),
+        requestResult(appearanceRequest),
+      ]);
+      const appearance = appearanceRecord === undefined
+        ? readLegacyAppearance() ?? { ...DEFAULT_APPEARANCE }
+        : normalizeAppearance(appearanceRecord);
+      return { clients, tariffs, appearance };
+    },
+  ));
+}
+
+export async function replaceJournal(snapshot: JournalSnapshot): Promise<void> {
+  if (typeof snapshot !== 'object' || snapshot === null) {
+    throw new Error('Снимок журнала не передан.');
+  }
+  if (!Array.isArray(snapshot.clients) || !Array.isArray(snapshot.tariffs)) {
+    throw new Error('Снимок журнала повреждён: нет списка клиентов или тарифов.');
+  }
+  const appearance = normalizeAppearance(snapshot.appearance);
+  const appearanceRecord: AppearanceRecord = { id: APPEARANCE_RECORD_ID, ...appearance };
+
+  await withDatabase(database => runTransaction(
+    database,
+    [CLIENT_STORE, TARIFF_STORE, SETTINGS_STORE],
+    'readwrite',
+    async (transaction) => {
+      const clientStore = transaction.objectStore(CLIENT_STORE);
+      const tariffStore = transaction.objectStore(TARIFF_STORE);
+      const settingsStore = transaction.objectStore(SETTINGS_STORE);
+      clientStore.clear();
+      tariffStore.clear();
+      settingsStore.clear();
+      for (const client of snapshot.clients) {
+        clientStore.add(client);
+      }
+      for (const tariff of snapshot.tariffs) {
+        tariffStore.add(tariff);
+      }
+      settingsStore.add(appearanceRecord);
+    },
+  ));
+}
+
+export async function saveAppearance(appearance: Appearance): Promise<void> {
+  const record: AppearanceRecord = { id: APPEARANCE_RECORD_ID, ...normalizeAppearance(appearance) };
+  await withDatabase(database => runTransaction(
+    database,
+    SETTINGS_STORE,
+    'readwrite',
+    async (transaction) => {
+      transaction.objectStore(SETTINGS_STORE).put(record);
     },
   ));
 }
