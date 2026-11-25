@@ -537,6 +537,6 @@ export function matchesClient(client: ClientFields, query: string): boolean {
     return true;
   }
   return [client.firstName, client.lastName].some(
-    (field) => field.trim().toLocaleLowerCase('ru-RU').startsWith(needle),
+    (field) => field.trim().toLocaleLowerCase('ru-RU').includes(needle),
   );
 }

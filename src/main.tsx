@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createClient, deleteClients, listClients, listTariffs, matchesClient, saveTariff, setArchived, setTariffEnabled, updateBilling } from './clients';
@@ -12,7 +12,18 @@ import './styles.css';
 const emptyFields: ClientFields = { firstName: '', lastName: '', phone: '', notes: '' };
 const nameOf = (client: Client) => [client.firstName, client.lastName].filter(Boolean).join(' ') || 'Без имени';
 const byTariffName = (a: Tariff, b: Tariff) => a.name.localeCompare(b.name, 'ru');
-type Screen = { kind: 'list' } | { kind: 'new' } | { kind: 'card'; client: Client } | { kind: 'tariffs' };
+type Screen = { kind: 'list' } | { kind: 'new' } | { kind: 'card'; client: Client } | { kind: 'settings' };
+type Appearance = { theme: 'light' | 'dark'; corners: 'rounded' | 'square' };
+const appearanceKey = 'podhod.appearance';
+
+function readAppearance(): Appearance {
+  try {
+    const saved: Partial<Appearance> | null = JSON.parse(localStorage.getItem(appearanceKey) ?? 'null');
+    return { theme: saved?.theme === 'dark' ? 'dark' : 'light', corners: saved?.corners === 'square' ? 'square' : 'rounded' };
+  } catch {
+    return { theme: 'light', corners: 'rounded' };
+  }
+}
 
 function DeleteDialog({ clients, busy, error, onCancel, onConfirm }: {
   clients: Client[]; busy: boolean; error: string; onCancel: () => void; onConfirm: () => void;
@@ -61,7 +72,19 @@ function App() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [today, setToday] = useState(localToday);
+  const [appearance, setAppearance] = useState(readAppearance);
   const errorBanner = useRef<HTMLParagraphElement>(null);
+
+  useLayoutEffect(() => {
+    document.documentElement.dataset.theme = appearance.theme;
+    document.documentElement.dataset.corners = appearance.corners;
+  }, [appearance]);
+
+  function changeAppearance(next: Appearance) {
+    setAppearance(next);
+    try { localStorage.setItem(appearanceKey, JSON.stringify(next)); }
+    catch { setNotice('Оформление изменено для этой вкладки, но браузер не позволил сохранить выбор.'); }
+  }
 
   async function load() {
     setError('');
@@ -160,8 +183,8 @@ function App() {
             disabled={busy} onClick={() => switchList(false)}>Клиенты</button>
           <button className={archive ? 'current' : ''} type="button" aria-current={archive ? 'page' : undefined}
             disabled={busy} onClick={() => switchList(true)}>Архив</button>
-          <button type="button" disabled={busy || !clients} onClick={() => {
-            setError(''); setNotice(''); setScreen({ kind: 'tariffs' });
+          <button type="button" disabled={busy} onClick={() => {
+            setError(''); setNotice(''); setScreen({ kind: 'settings' });
           }}>Настройки</button>
         </nav>
         <div className="section-heading">
@@ -172,7 +195,7 @@ function App() {
         </div>
         {clients === null ? (error ? <button type="button" onClick={() => void load()}>Повторить</button> : <p role="status">Открываем журнал…</p>) : <>
           <label className="search">Поиск
-            <input type="search" value={query} placeholder="Начало имени или фамилии" disabled={busy}
+            <input type="search" value={query} placeholder="Имя, фамилия или их часть" disabled={busy}
               onChange={event => { setQuery(event.target.value); setSelected([]); }} />
           </label>
           {chosen.length > 0 && <div className="selection">
@@ -186,7 +209,7 @@ function App() {
           </div>}
           {visible.length === 0 ? <div className="empty">
             <strong>{query.trim() ? 'Ничего не найдено' : archive ? 'Архив пуст' : 'Пока нет клиентов'}</strong>
-            <p>{query.trim() ? 'Попробуйте другое начало имени или фамилии.' : archive
+            <p>{query.trim() ? 'Попробуйте ввести другую часть имени или фамилии.' : archive
               ? 'Сюда попадают только карточки, которые вы отправили в архив.'
               : 'Добавьте первую карточку. Имя, телефон и заметки необязательны.'}</p>
           </div> : <ul className="clients" aria-label={archive ? 'Клиенты в архиве' : 'Список клиентов'}>
@@ -255,11 +278,25 @@ function App() {
           }, 'Изменения сохранены.')} />
       </>}
 
-      {screen.kind === 'tariffs' && <Tariffs tariffs={tariffs} busy={busy} onSave={(draft, id) => write(async () => {
-        rememberTariff(await saveTariff(draft, id));
-      }, 'Тариф сохранён.')} onToggle={tariff => void write(async () => {
-        rememberTariff(await setTariffEnabled(tariff.id, !tariff.enabled));
-      }, tariff.enabled ? 'Тариф отключён.' : 'Тариф включён.')} />}
+      {screen.kind === 'settings' && <>
+        <h1>Настройки</h1>
+        <section className="panel billing-panel" aria-labelledby="appearance-title">
+          <h2 id="appearance-title">Оформление</h2>
+          <label htmlFor="appearance-theme">Тема</label>
+          <select id="appearance-theme" value={appearance.theme} onChange={event => {
+            changeAppearance({ ...appearance, theme: event.target.value === 'dark' ? 'dark' : 'light' });
+          }}><option value="light">Светлая</option><option value="dark">Тёмная</option></select>
+          <label htmlFor="appearance-corners">Углы</label>
+          <select id="appearance-corners" value={appearance.corners} onChange={event => {
+            changeAppearance({ ...appearance, corners: event.target.value === 'square' ? 'square' : 'rounded' });
+          }}><option value="rounded">Скруглённые</option><option value="square">Прямые</option></select>
+        </section>
+        {clients !== null && <Tariffs tariffs={tariffs} busy={busy} onSave={(draft, id) => write(async () => {
+          rememberTariff(await saveTariff(draft, id));
+        }, 'Тариф сохранён.')} onToggle={tariff => void write(async () => {
+          rememberTariff(await setTariffEnabled(tariff.id, !tariff.enabled));
+        }, tariff.enabled ? 'Тариф отключён.' : 'Тариф включён.')} />}
+      </>}
 
       {pendingDelete.length > 0 && <DeleteDialog clients={pendingDelete} busy={busy} error={error}
         onCancel={() => { setPendingDelete([]); setError(''); }} onConfirm={remove} />}

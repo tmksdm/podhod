@@ -53,7 +53,7 @@ export function Tariffs({ tariffs, busy, onSave, onToggle }: {
   }
 
   return <>
-    <div className="section-heading"><h1>Тарифы</h1>
+    <div className="section-heading"><h2>Тарифы</h2>
       {editing === null && <button type="button" className="primary" disabled={busy} onClick={() => edit()}>Новый тариф</button>}
     </div>
     {editing !== null && <form className="panel billing-panel" onSubmit={save}>

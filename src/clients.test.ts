@@ -183,9 +183,11 @@ describe('matchesClient', () => {
     expect(matchesClient(client, 'Петрова')).toBe(true);
   });
 
-  it('не находит совпадение в середине имени или фамилии', () => {
-    expect(matchesClient(client, 'нна')).toBe(false);
-    expect(matchesClient(client, 'етров')).toBe(false);
+  it('находит любую часть имени или фамилии без учёта регистра', () => {
+    expect(matchesClient(client, 'нна')).toBe(true);
+    expect(matchesClient(client, 'етров')).toBe(true);
+    expect(matchesClient({ ...client, lastName: 'Бубликов' }, '  ЛиК  ')).toBe(true);
+    expect(matchesClient(client, 'лик')).toBe(false);
   });
 
   it('игнорирует пробелы вокруг запроса и пустой запрос', () => {

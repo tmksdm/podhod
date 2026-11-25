@@ -31,6 +31,21 @@ try {
   const button = name => page.getByRole('button', { name, exact: true });
   const checkbox = name => page.getByRole('checkbox', { name: `Выбрать ${name}`, exact: true });
   const search = () => page.getByRole('searchbox');
+  const theme = () => page.getByLabel('Тема', { exact: true });
+  const corners = () => page.getByLabel('Углы', { exact: true });
+  await expect(page.locator('html')).toHaveCSS('color-scheme', 'light');
+  await expect(search()).not.toHaveCSS('border-radius', '0px');
+  await button('Настройки').click();
+  await theme().selectOption('dark');
+  await expect(page.locator('html')).toHaveCSS('color-scheme', 'dark');
+  await expect(corners()).not.toHaveCSS('border-radius', '0px');
+  await corners().selectOption('square');
+  await expect(corners()).toHaveCSS('border-radius', '0px');
+  await theme().selectOption('light');
+  await expect(corners()).toHaveCSS('border-radius', '0px');
+  await theme().selectOption('dark');
+  await page.getByRole('button', { name: /К списку/ }).click();
+  await expect(search()).toHaveCSS('border-radius', '0px');
   async function add(first = '', last = '', phone = '', notes = '') {
     await button('Новый клиент').click();
     await page.getByLabel('Имя', { exact: true }).fill(first);
@@ -53,6 +68,9 @@ try {
   await search().fill('теСТ');
   await expect(checkbox('Лада Тестова')).toBeVisible();
   await search().fill('ест');
+  await expect(checkbox('Лада Тестова')).toBeVisible();
+  await expect(page.getByRole('checkbox')).toHaveCount(1);
+  await search().fill('лик');
   await expect(page.getByText('Ничего не найдено')).toBeVisible();
   await search().clear();
   await checkbox('Лада Тестова').check();
@@ -63,11 +81,13 @@ try {
   await browser.close();
   browser = undefined;
   page = await launch();
+  await expect(page.locator('html')).toHaveCSS('color-scheme', 'dark');
+  await expect(search()).toHaveCSS('border-radius', '0px');
   await expect(checkbox('Марк Примеров')).toBeVisible();
   await expect(checkbox('Лада Тестова')).toHaveCount(0);
   await button('Архив').click();
   await expect(page.getByRole('checkbox')).toHaveCount(2);
-  await search().fill('ТЕС');
+  await search().fill('ЕСТ');
   await page.getByRole('button', { name: /Лада Тестова/ }).click();
   await expect(page.getByText('В архиве', { exact: true })).toBeVisible();
   await expect(page.getByText('Учебная заметка')).toBeVisible();
@@ -80,6 +100,7 @@ try {
   await checkbox('Без имени').check();
   await button('Удалить').click();
   const dialog = () => page.getByRole('dialog');
+  await expect(dialog()).toHaveCSS('border-radius', '0px');
   await expect(dialog()).toContainText('Без имени');
   await button('Удалить навсегда').click();
   await expect(page.getByText('Архив пуст')).toBeVisible();
@@ -254,8 +275,15 @@ try {
   await button('Клиенты').click();
   await expect(checkbox('Клиент Пример')).toHaveCount(0);
   await expect(checkbox('Я перенос')).toBeVisible();
+  await page.setViewportSize({ width: 1200, height: 850 });
+  await button('Настройки').click();
+  await expect(theme()).toHaveValue('dark');
+  await expect(corners()).toHaveValue('square');
+  await corners().selectOption('rounded');
+  await expect(corners()).not.toHaveCSS('border-radius', '0px');
+  await expect(page.locator('html')).toHaveCSS('color-scheme', 'dark');
   assert.deepEqual(errors, []);
-  console.log('PASS: Chromium 390×844, тарифы, взносы и исправления, продление, перенос, сортировка; сохранение архива платежей после перезапуска и удаление.');
+  console.log('PASS: Chromium 390×844, тема и углы после перезапуска, поиск, тарифы, взносы, продление, архив и удаление.');
 } finally {
   try { await browser?.close(); } finally {
     server?.httpServer.close();
