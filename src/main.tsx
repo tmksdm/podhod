@@ -3,9 +3,9 @@ import type { FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createClient, deleteClients, listClients, listTariffs, matchesClient, saveTariff, setArchived, setTariffEnabled, updateBilling } from './clients';
 import type { Client, ClientFields } from './clients';
-import { billingBalance, compareDue, dueStatus, localToday } from './billing';
+import { activeFreeze, billingBalance, compareDue, dueStatus, localToday } from './billing';
 import type { Tariff } from './billing';
-import { BillingCard, EnrollmentFields, Tariffs, enrollmentOf, initialEnrollment, money } from './billing-ui';
+import { BillingCard, EnrollmentFields, Tariffs, dateLabel, enrollmentOf, initialEnrollment, money } from './billing-ui';
 import type { EnrollmentForm } from './billing-ui';
 import './styles.css';
 
@@ -215,6 +215,7 @@ function App() {
           </div> : <ul className="clients" aria-label={archive ? 'Клиенты в архиве' : 'Список клиентов'}>
             {visible.map(client => {
               const balance = billingBalance(client.billing);
+              const freeze = activeFreeze(client.billing, today);
               return <li key={client.id}>
                 <label className="pick">
                   <input type="checkbox" aria-label={`Выбрать ${nameOf(client)}`} disabled={busy}
@@ -228,6 +229,7 @@ function App() {
                 }}>
                   <span><strong>{nameOf(client)}</strong>{client.phone && <small>{client.phone}</small>}
                     {client.billing && <small>{dueStatus(client.billing, today)}</small>}
+                    {freeze && <small>Заморожен до {dateLabel(freeze.plannedReturn)}</small>}
                     {balance > 0 && <small className="debt">К доплате: {money(balance)}</small>}</span>
                   <span aria-hidden="true">›</span>
                 </button>

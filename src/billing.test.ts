@@ -463,7 +463,7 @@ describe('версия базы и миграция', () => {
     await expect(listTariffs()).resolves.toEqual([tariff]);
 
     const current = await openDatabaseVersion(undefined);
-    expect(current.version).toBe(2);
+    expect(current.version).toBe(3);
     current.close();
   });
 });

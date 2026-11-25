@@ -26,9 +26,18 @@ export type Payment = {
   amount: number;
 };
 
+export type Freeze = {
+  id: string;
+  periodId: string;
+  start: string;
+  plannedReturn: string;
+  returnedOn?: string;
+};
+
 export type Billing = {
   periods: Period[];
   payments: Payment[];
+  freezes?: Freeze[];
 };
 
 export type Enrollment =
@@ -44,7 +53,9 @@ export type Enrollment =
 export type BillingAction =
   | Enrollment
   | { kind: 'pay'; periodId: string; date: string; amount: number }
-  | { kind: 'correct'; paymentId: string; amount: number };
+  | { kind: 'correct'; paymentId: string; amount: number }
+  | { kind: 'freeze'; start: string; plannedReturn: string }
+  | { kind: 'return'; freezeId: string };
 
 export class BillingError extends Error {
   constructor(message: string) {
@@ -165,6 +176,85 @@ export function addDuration(date: string, duration: number, unit: 'days' | 'mont
   return formatDate(utcDate(targetYear, targetMonth, targetDay));
 }
 
+function shiftDays(date: string, days: number): string {
+  const { year, month, day } = parseDate(date);
+  return formatDate(utcDate(year, month - 1, day + days));
+}
+
+function dayNumber(value: string): number {
+  const { year, month, day } = parseDate(value);
+  return utcDate(year, month - 1, day).getTime() / 86_400_000;
+}
+
+export function freezeDays(freeze: Freeze): number {
+  return dayNumber(freeze.returnedOn ?? freeze.plannedReturn) - dayNumber(freeze.start);
+}
+
+export function activeFreeze(billing: Billing | undefined, today: string): Freeze | undefined {
+  return billing?.freezes?.find(freeze => freeze.start <= today && today < (freeze.returnedOn ?? freeze.plannedReturn));
+}
+
+function shiftPeriods(periods: Period[], index: number, days: number): Period[] {
+  // Shift the existing boundaries, not the tariff duration, to preserve paid days even at month-end.
+  return periods.map((period, i) => i < index ? period : {
+    ...period,
+    start: i === index || period.start === null ? period.start : shiftDays(period.start, days),
+    due: shiftDays(period.due, days),
+  });
+}
+
+export function planFreeze(billing: Billing, id: string, start: string, plannedReturn: string, today: string): void {
+  const days = dayNumber(plannedReturn) - dayNumber(start);
+  if (start < today || days <= 0) {
+    throw new BillingError('Начало не раньше сегодняшнего дня, возвращение после начала заморозки.');
+  }
+  const existing = billing.freezes ?? [];
+  if (existing.some(freeze => {
+    const end = freeze.returnedOn ?? freeze.plannedReturn;
+    return freeze.start < end && start < end && freeze.start < plannedReturn;
+  })) {
+    throw new BillingError('Заморозки не должны пересекаться.');
+  }
+
+  const index = billing.periods.findIndex(period => (period.start === null || period.start <= start) && start < period.due);
+  if (index === -1) {
+    throw new BillingError('Начало заморозки должно быть внутри действующего периода.');
+  }
+
+  const periods = shiftPeriods(billing.periods, index, days);
+  const candidate: Freeze = { id, periodId: periods[index].id, start, plannedReturn };
+  const freezes = [...existing, candidate].sort((a, b) => a.start.localeCompare(b.start));
+  const anchors = new Map(periods.map((period, i) => [period.id, i]));
+  for (const freeze of freezes) {
+    if (freeze.returnedOn !== undefined || freeze.plannedReturn <= today) continue;
+    const anchor = anchors.get(freeze.periodId)!;
+    const period = periods[anchor];
+    // Even if pending pauses are shortened, the booked start must still fit without borrowing those days.
+    const removable = freezes.reduce((total, booking) => {
+      if (booking.returnedOn !== undefined || booking.plannedReturn <= today
+          || anchors.get(booking.periodId)! > anchor) return total;
+      const earliestReturn = booking.start < today ? today : booking.start;
+      return total + dayNumber(booking.plannedReturn) - dayNumber(earliestReturn);
+    }, 0);
+    if ((period.start !== null && freeze.start < period.start) || dayNumber(freeze.start) >= dayNumber(period.due) - removable) {
+      throw new BillingError('Начало одной из заморозок зависит от другой паузы. Выберите даты внутри периода без этого сдвига.');
+    }
+  }
+  billing.periods = periods;
+  billing.freezes = freezes;
+}
+
+export function returnFromFreeze(billing: Billing, id: string, today: string): void {
+  const freeze = activeFreeze(billing, today);
+  if (freeze === undefined || freeze.id !== id) {
+    throw new BillingError('Досрочно завершить можно только текущую заморозку.');
+  }
+  const index = billing.periods.findIndex(period => period.id === freeze.periodId);
+  if (index === -1) throw new BillingError('Период заморозки не найден.');
+  billing.periods = shiftPeriods(billing.periods, index, dayNumber(today) - dayNumber(freeze.plannedReturn));
+  billing.freezes = billing.freezes!.map(item => item.id === id ? { ...item, returnedOn: today } : item);
+}
+
 export function periodBalance(billing: Billing, period: Period): number {
   if (!Number.isSafeInteger(period.charge)) {
     throw new BillingError('Начисление периода должно быть целым числом копеек.');
@@ -236,8 +326,8 @@ export function compareDue(
   if (right === undefined) {
     return -1;
   }
-  const leftRank = dueRank(left.due, today);
-  const rightRank = dueRank(right.due, today);
+  const leftRank = activeFreeze(a, today) ? 4 : dueRank(left.due, today);
+  const rightRank = activeFreeze(b, today) ? 4 : dueRank(right.due, today);
   if (leftRank !== rightRank) {
     return leftRank - rightRank;
   }
@@ -283,6 +373,7 @@ export function previewPeriod(
 }
 
 export function dueStatus(billing: Billing | undefined, today: string): string {
+  if (activeFreeze(billing, today)) return 'Заморожен';
   const period = latestPeriod(billing);
   if (period === undefined) {
     return 'Без абонемента';

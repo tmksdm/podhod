@@ -1,11 +1,14 @@
 import { useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import type { Billing, BillingAction, Enrollment, Tariff, TariffDraft } from './billing';
-import { billingBalance, dueStatus, latestPeriod, localToday, periodBalance, previewPeriod } from './billing';
+import { activeFreeze, addDuration, billingBalance, dueStatus, freezeDays, latestPeriod, localToday, periodBalance, previewPeriod } from './billing';
 
 const currency = new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', minimumFractionDigits: 0 });
 const fractionalCurrency = new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', minimumFractionDigits: 2 });
-const dateLabel = (date: string) => date.split('-').reverse().join('.');
+export const dateLabel = (date: string) => date.split('-').reverse().join('.');
+function safeAddDays(date: string, days: number): string | undefined {
+  try { return addDuration(date, days, 'days'); } catch { return undefined; }
+}
 const rubles = (amount: number) => `${(amount - amount % 100) / 100}.${String(amount % 100).padStart(2, '0')}`;
 const durationText = (tariff: Tariff) => `${tariff.duration} ${tariff.unit === 'days' ? 'дн.' : 'мес.'}`;
 
@@ -127,16 +130,19 @@ export function BillingCard({ billing, tariffs, archived, today, busy, onSave }:
 }) {
   const [form, setForm] = useState<EnrollmentForm | null>(null);
   const [payment, setPayment] = useState<{ kind: 'pay' | 'correct'; id: string; date: string; amount: string } | null>(null);
+  const [freezeForm, setFreezeForm] = useState<{ start: string; plannedReturn: string } | null>(null);
   const latest = latestPeriod(billing);
   const current = billing?.periods.find(period => (period.start === null || period.start <= today) && today < period.due);
   const shown = current ?? latest;
+  const active = activeFreeze(billing, today);
+  const freezeHistory = [...(billing?.freezes ?? [])].sort((a, b) => b.start.localeCompare(a.start));
   const canEnroll = tariffs.some(tariff => tariff.enabled);
   const balance = billingBalance(billing);
-  const canAct = !archived && !form && !payment;
+  const canAct = !archived && !form && !payment && !freezeForm;
 
   async function submit(event: FormEvent, action: BillingAction) {
     event.preventDefault();
-    if (await onSave(action)) { setForm(null); setPayment(null); }
+    if (await onSave(action)) { setForm(null); setPayment(null); setFreezeForm(null); }
   }
 
   function controls(): ReactNode {
@@ -156,7 +162,8 @@ export function BillingCard({ billing, tariffs, archived, today, busy, onSave }:
       {shown && <><strong>{shown.tariff.name}</strong>
         <span>{shown.start ? `Начало периода: ${dateLabel(shown.start)}` : 'Дата начала не указана при переносе'}</span>
         {current && latest && current.id !== latest.id && <span>Текущий период до: {dateLabel(current.due)}</span>}
-        {latest && <span>Следующая оплата: {dateLabel(latest.due)}</span>}</>}
+        {latest && <span>Следующая оплата: {dateLabel(latest.due)}</span>}
+        {active && <span>Возвращение: {dateLabel(active.plannedReturn)}</span>}</>}
       {balance > 0 && <strong className="debt">Осталось доплатить {money(balance)}</strong>}
       {controls()}
       {form && <form onSubmit={event => void submit(event, enrollmentOf(form))}>
@@ -167,6 +174,48 @@ export function BillingCard({ billing, tariffs, archived, today, busy, onSave }:
         </fieldset>
       </form>}
     </section>
+    {billing && <section className="panel billing-panel" aria-label="Заморозка">
+      <h2>Заморозка</h2>
+      {active && <div className="freeze-state">
+        <strong>Заморожен до {dateLabel(active.plannedReturn)}</strong>
+        <small className="muted">Начало заморозки: {dateLabel(active.start)} · {freezeDays(active)} дн.</small>
+        {canAct && <div className="actions"><button type="button" disabled={busy}
+          onClick={() => void onSave({ kind: 'return', freezeId: active.id })}>Завершить заморозку сегодня</button></div>}
+      </div>}
+      {freezeForm && <form onSubmit={event => void submit(event, {
+        kind: 'freeze', start: freezeForm.start, plannedReturn: freezeForm.plannedReturn,
+      })}>
+        <fieldset disabled={busy} className="billing-fields">
+          <label>Начало заморозки<input type="date" required min={today} value={freezeForm.start}
+            onChange={event => setFreezeForm({ ...freezeForm, start: event.target.value })} /></label>
+          <label>День возвращения<input type="date" required min={safeAddDays(freezeForm.start || today, 1)}
+            value={freezeForm.plannedReturn}
+            onChange={event => setFreezeForm({ ...freezeForm, plannedReturn: event.target.value })} /></label>
+          <small className="muted">День возвращения не входит в паузу и станет первым днём занятий.</small>
+          <div className="actions"><button type="submit" className="primary">Сохранить заморозку</button>
+            <button type="button" onClick={() => setFreezeForm(null)}>Отмена</button></div>
+        </fieldset>
+      </form>}
+      {!freezeForm && canAct && latest && <div className="actions"><button type="button" disabled={busy}
+        onClick={() => {
+          const start = active?.plannedReturn ?? today;
+          setFreezeForm({ start, plannedReturn: safeAddDays(start, 7) ?? start });
+        }}>Запланировать заморозку</button></div>}
+      {!latest && <p className="muted">Заморозку можно оформить после начала абонемента.</p>}
+      {freezeHistory.length === 0 ? <p className="muted">Заморозок пока нет.</p> : <div className="freeze-history">
+        <h3>История заморозок</h3>
+        {freezeHistory.map(freeze => {
+          const plannedDays = freezeDays({ ...freeze, returnedOn: undefined });
+          const actualDays = freezeDays(freeze);
+          return <section className="freeze-period" key={freeze.id}>
+            <strong>{freeze.returnedOn ? 'Досрочное возвращение' : active?.id === freeze.id ? 'Текущая заморозка'
+              : freeze.start > today ? 'Запланирована' : 'Завершена'}</strong>
+            <small className="muted">Начало: {dateLabel(freeze.start)} · План возвращения: {dateLabel(freeze.plannedReturn)} · {plannedDays} дн.</small>
+            {freeze.returnedOn && <small className="muted">Фактическое возвращение: {dateLabel(freeze.returnedOn)} · {actualDays} дн.</small>}
+          </section>;
+        })}
+      </div>}
+    </section>}
     {billing && <section className="panel billing-panel" aria-label="История платежей">
       <h2>История платежей</h2>
       {billing.payments.length === 0 && <p className="muted">Платежей пока нет.</p>}

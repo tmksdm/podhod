@@ -275,6 +275,72 @@ try {
   await button('Клиенты').click();
   await expect(checkbox('Клиент Пример')).toHaveCount(0);
   await expect(checkbox('Я перенос')).toBeVisible();
+
+  const freeze = () => page.getByRole('region', { name: 'Заморозка', exact: true });
+  async function planPause(start, end) {
+    await button('Запланировать заморозку').click();
+    await label('Начало заморозки').fill(start);
+    await label('День возвращения').fill(end);
+    await button('Сохранить заморозку').click();
+  }
+  await setDate('2026-09-04');
+  await button('Новый клиент').click();
+  await label('Имя').fill('Учебная заморозка');
+  await label('Абонемент').selectOption('start');
+  const monthId = await label('Тариф').locator('option').filter({ hasText: 'Месяц обновлённый' }).getAttribute('value');
+  assert.ok(monthId);
+  await label('Тариф').selectOption(monthId);
+  await label('Дата начала').fill('2026-08-31');
+  await button('Сохранить карточку').click();
+  await button('Продлить').click();
+  await button('Сохранить абонемент').click();
+  await expect(subscription()).toContainText('Следующая оплата: 30.10.2026');
+  const payments = () => history().locator('.payment-line > span').allTextContents();
+  const originalPayments = await payments();
+  assert.equal(originalPayments.length, 2);
+  await planPause('2026-10-30', '2026-11-01');
+  await expect(page.getByRole('alert')).toContainText('внутри действующего периода');
+  await button('Отмена').click();
+  await planPause('2026-09-05', '2026-09-10');
+  await expect(freeze()).toContainText('Запланирована');
+  await expect(freeze()).toContainText(/10\.09\.2026.*5 дн\./);
+  await expect(subscription()).toContainText('Текущий период до: 05.10.2026');
+  await expect(subscription()).toContainText('Следующая оплата: 04.11.2026');
+  await planPause('2026-09-07', '2026-09-11');
+  await expect(page.getByRole('alert')).toContainText('не должны пересекаться');
+  await button('Отмена').click();
+  await setDate('2026-09-08');
+  const frozenClient = page.getByRole('button', { name: /^Учебная заморозка/ });
+  await expect(frozenClient).toContainText(/Заморожен.*10\.09\.2026/);
+  await expect(frozenClient).not.toContainText('Просрочен');
+  await frozenClient.click();
+  await expect(subscription()).toContainText('Заморожен');
+  await expect(subscription()).toContainText('10.09.2026');
+  await noHorizontalScroll();
+  await button('Завершить заморозку сегодня').click();
+  await expect(subscription()).not.toContainText('Заморожен');
+  await expect(subscription()).toContainText('Текущий период до: 03.10.2026');
+  await expect(subscription()).toContainText('Следующая оплата: 02.11.2026');
+  await expect(freeze()).toContainText(/Фактическое возвращение: 08\.09\.2026.*3 дн\./);
+  assert.deepEqual(await payments(), originalPayments);
+  await back();
+  await checkbox('Учебная заморозка').check();
+  await button('В архив').click();
+  await expect(checkbox('Учебная заморозка')).toHaveCount(0);
+  await browser.close();
+  browser = undefined;
+  page = await launch();
+  await setDate('2026-09-08');
+  await button('Архив').click();
+  await open('Учебная заморозка');
+  await expect(freeze()).toContainText('Досрочное возвращение');
+  await expect(freeze()).toContainText('08.09.2026');
+  await expect(subscription()).toContainText('Следующая оплата: 02.11.2026');
+  await expect(button('Запланировать заморозку')).toHaveCount(0);
+  assert.deepEqual(await payments(), originalPayments);
+  await noHorizontalScroll();
+  await page.getByRole('button', { name: /К архиву/ }).click();
+
   await page.setViewportSize({ width: 1200, height: 850 });
   await button('Настройки').click();
   await expect(theme()).toHaveValue('dark');
@@ -283,7 +349,7 @@ try {
   await expect(corners()).not.toHaveCSS('border-radius', '0px');
   await expect(page.locator('html')).toHaveCSS('color-scheme', 'dark');
   assert.deepEqual(errors, []);
-  console.log('PASS: Chromium 390×844, тема и углы после перезапуска, поиск, тарифы, взносы, продление, архив и удаление.');
+  console.log('PASS: Chromium 390×844, клиенты, оформление, тарифы, взносы, заморозка, ранний возврат и сохранение после перезапуска.');
 } finally {
   try { await browser?.close(); } finally {
     server?.httpServer.close();

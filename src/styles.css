@@ -112,6 +112,11 @@ textarea { resize: vertical; }
 .billing-panel .badges, .billing-panel p { margin: 0; }
 .billing-fields { display: grid; gap: .85rem; border: 0; padding: 0; margin: 0; min-inline-size: 0; }
 .payment-period { display: grid; gap: .45rem; padding-top: .7rem; border-top: 1px solid var(--line); }
+.freeze-state { display: grid; gap: .45rem; }
+.freeze-history { display: grid; gap: .6rem; }
+.freeze-history h3 { font-size: 1rem; margin: .3rem 0 0; }
+.freeze-period { display: grid; gap: .35rem; padding-top: .7rem; border-top: 1px solid var(--line); }
+.freeze-period small { display: block; }
 .payment-line { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .45rem; }
 .debt, .client .debt { color: var(--danger); }
 .notice, .error { border-inline-start: 3px solid; padding: .45rem .75rem; }

@@ -6,7 +6,7 @@ import type {
   Tariff,
   TariffDraft,
 } from './billing';
-import { BillingError, billingBalance, periodBalance, previewPeriod } from './billing';
+import { BillingError, billingBalance, localToday, periodBalance, planFreeze, previewPeriod, returnFromFreeze } from './billing';
 
 export type ClientFields = {
   firstName: string;
@@ -22,7 +22,7 @@ export type Client = ClientFields & {
 };
 
 const DATABASE_NAME = 'podhod';
-const DATABASE_VERSION = 2;
+const DATABASE_VERSION = 3;
 const CLIENT_STORE = 'clients';
 const TARIFF_STORE = 'tariffs';
 
@@ -214,6 +214,7 @@ function cloneBilling(billing: Billing | undefined): Billing {
   return {
     periods: (billing?.periods ?? []).map(period => ({ ...period, tariff: { ...period.tariff } })),
     payments: (billing?.payments ?? []).map(payment => ({ ...payment })),
+    ...(billing?.freezes && { freezes: billing.freezes.map(freeze => ({ ...freeze })) }),
   };
 }
 
@@ -476,6 +477,12 @@ export async function updateBilling(id: string, action: BillingAction): Promise<
           break;
         case 'correct':
           applyCorrection(billing, action);
+          break;
+        case 'freeze':
+          planFreeze(billing, newRecordId('freeze'), action.start, action.plannedReturn, localToday());
+          break;
+        case 'return':
+          returnFromFreeze(billing, action.freezeId, localToday());
           break;
         default:
           throw new BillingError('Неизвестное действие с абонементом.');

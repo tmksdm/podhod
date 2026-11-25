@@ -75,7 +75,7 @@ describe('createClient и listClients', () => {
       request.onerror = () => reject(request.error);
     });
 
-    expect(version).toBe(2);
+    expect(version).toBe(3);
     await expect(deleteDatabase()).resolves.toBeUndefined();
     await expect(listClients()).resolves.toEqual([]);
     expect(created.archived).toBe(false);
