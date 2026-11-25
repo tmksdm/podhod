@@ -61,7 +61,7 @@ describe('createClient и listClients', () => {
     expect(clients).toEqual(expect.arrayContaining([first, second]));
   });
 
-  it('создаёт версию базы 1 и закрывает соединение после операции', async () => {
+  it('создаёт версию базы 2 и закрывает соединение после операции', async () => {
     const created = await createClient(fields());
 
     const version = await new Promise<number>((resolve, reject) => {
@@ -75,7 +75,7 @@ describe('createClient и listClients', () => {
       request.onerror = () => reject(request.error);
     });
 
-    expect(version).toBe(1);
+    expect(version).toBe(2);
     await expect(deleteDatabase()).resolves.toBeUndefined();
     await expect(listClients()).resolves.toEqual([]);
     expect(created.archived).toBe(false);

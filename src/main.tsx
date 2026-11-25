@@ -1,13 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
-import { createClient, deleteClients, listClients, matchesClient, setArchived } from './clients';
+import { createClient, deleteClients, listClients, listTariffs, matchesClient, saveTariff, setArchived, setTariffEnabled, updateBilling } from './clients';
 import type { Client, ClientFields } from './clients';
+import { billingBalance, compareDue, dueStatus, localToday } from './billing';
+import type { Tariff } from './billing';
+import { BillingCard, EnrollmentFields, Tariffs, enrollmentOf, initialEnrollment, money } from './billing-ui';
+import type { EnrollmentForm } from './billing-ui';
 import './styles.css';
 
 const emptyFields: ClientFields = { firstName: '', lastName: '', phone: '', notes: '' };
 const nameOf = (client: Client) => [client.firstName, client.lastName].filter(Boolean).join(' ') || 'Без имени';
-type Screen = { kind: 'list' } | { kind: 'new' } | { kind: 'card'; client: Client };
+const byTariffName = (a: Tariff, b: Tariff) => a.name.localeCompare(b.name, 'ru');
+type Screen = { kind: 'list' } | { kind: 'new' } | { kind: 'card'; client: Client } | { kind: 'tariffs' };
 
 function DeleteDialog({ clients, busy, error, onCancel, onConfirm }: {
   clients: Client[]; busy: boolean; error: string; onCancel: () => void; onConfirm: () => void;
@@ -23,7 +28,9 @@ function DeleteDialog({ clients, busy, error, onCancel, onConfirm }: {
     <dialog ref={dialog} aria-labelledby="delete-title" aria-describedby="delete-warning"
       onCancel={(event) => { event.preventDefault(); if (!busy) onCancel(); }}>
       <h2 id="delete-title">Удалить выбранных?</h2>
-      <p id="delete-warning">Записи будут удалены навсегда. Отменить это действие нельзя.</p>
+      <p id="delete-warning">Карточки будут удалены навсегда.
+        {clients.some(client => client.billing) && ' Их абонементы и история платежей тоже будут удалены.'}
+        {' Отменить это действие нельзя.'}</p>
       <ul className="delete-list">
         {clients.map(client => <li key={client.id}>
           <strong>{nameOf(client)}</strong>
@@ -42,26 +49,44 @@ function DeleteDialog({ clients, busy, error, onCancel, onConfirm }: {
 
 function App() {
   const [clients, setClients] = useState<Client[] | null>(null);
+  const [tariffs, setTariffs] = useState<Tariff[]>([]);
   const [screen, setScreen] = useState<Screen>({ kind: 'list' });
   const [archive, setArchive] = useState(false);
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
   const [pendingDelete, setPendingDelete] = useState<Client[]>([]);
   const [fields, setFields] = useState(emptyFields);
+  const [enrollment, setEnrollment] = useState<EnrollmentForm | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [today, setToday] = useState(localToday);
+  const errorBanner = useRef<HTMLParagraphElement>(null);
 
   async function load() {
     setError('');
-    try { setClients(await listClients()); }
+    try {
+      const [nextClients, nextTariffs] = await Promise.all([listClients(), listTariffs()]);
+      setTariffs(nextTariffs.sort(byTariffName));
+      setClients(nextClients);
+    }
     catch { setError('Не удалось открыть журнал. Проверьте, доступно ли хранилище браузера.'); }
   }
   useEffect(() => { void load(); }, []);
+  useEffect(() => { if (error) errorBanner.current?.focus(); }, [error]);
+  useEffect(() => {
+    const refreshToday = () => setToday(localToday());
+    window.addEventListener('focus', refreshToday);
+    document.addEventListener('visibilitychange', refreshToday);
+    return () => {
+      window.removeEventListener('focus', refreshToday);
+      document.removeEventListener('visibilitychange', refreshToday);
+    };
+  }, []);
 
   const section = (clients ?? []).filter(client => client.archived === archive);
   const visible = section.filter(client => matchesClient(client, query)).sort(
-    (a, b) => nameOf(a).localeCompare(nameOf(b), 'ru'),
+    (a, b) => (archive ? 0 : compareDue(a.billing, b.billing, today)) || nameOf(a).localeCompare(nameOf(b), 'ru'),
   );
   const chosen = visible.filter(client => selected.includes(client.id));
 
@@ -78,15 +103,19 @@ function App() {
     setBusy(true);
     setError('');
     setNotice('');
-    try { await action(); setNotice(message); }
-    catch { setError('Не удалось сохранить изменения. Повторите попытку.'); }
+    try { await action(); setNotice(message); return true; }
+    catch (reason) {
+      setError(reason instanceof Error && reason.name === 'BillingError' ? reason.message :
+        'Не удалось сохранить изменения. Повторите попытку.');
+      return false;
+    }
     finally { setBusy(false); }
   }
 
   function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void write(async () => {
-      const client = await createClient(fields);
+      const client = await createClient(fields, enrollment ? enrollmentOf(enrollment) : undefined);
       setClients(current => [...(current ?? []), client]);
       switchList(false);
       setScreen({ kind: 'card', client });
@@ -112,6 +141,10 @@ function App() {
     }, 'Выбранные карточки удалены.');
   }
 
+  function rememberTariff(tariff: Tariff) {
+    setTariffs(current => [...current.filter(item => item.id !== tariff.id), tariff].sort(byTariffName));
+  }
+
   return (
     <main className="shell" aria-busy={busy}>
       <header className="masthead">
@@ -119,7 +152,7 @@ function App() {
         <div><div className="brand">Подход</div><div className="subtitle">Журнал тренера</div></div>
       </header>
       {notice && <p className="notice" role="status">{notice}</p>}
-      {error && !pendingDelete.length && <p className="error" role="alert">{error}</p>}
+      {error && !pendingDelete.length && <p ref={errorBanner} tabIndex={-1} className="error" role="alert">{error}</p>}
 
       {screen.kind === 'list' && <>
         <nav aria-label="Разделы журнала">
@@ -127,11 +160,14 @@ function App() {
             disabled={busy} onClick={() => switchList(false)}>Клиенты</button>
           <button className={archive ? 'current' : ''} type="button" aria-current={archive ? 'page' : undefined}
             disabled={busy} onClick={() => switchList(true)}>Архив</button>
+          <button type="button" disabled={busy || !clients} onClick={() => {
+            setError(''); setNotice(''); setScreen({ kind: 'tariffs' });
+          }}>Настройки</button>
         </nav>
         <div className="section-heading">
           <h1>{archive ? 'Архив' : 'Клиенты'}</h1>
           {!archive && clients && <button type="button" className="primary" disabled={busy} onClick={() => {
-            setFields(emptyFields); setError(''); setNotice(''); setScreen({ kind: 'new' });
+            setFields(emptyFields); setEnrollment(null); setError(''); setNotice(''); setScreen({ kind: 'new' });
           }}>Новый клиент</button>}
         </div>
         {clients === null ? (error ? <button type="button" onClick={() => void load()}>Повторить</button> : <p role="status">Открываем журнал…</p>) : <>
@@ -154,21 +190,26 @@ function App() {
               ? 'Сюда попадают только карточки, которые вы отправили в архив.'
               : 'Добавьте первую карточку. Имя, телефон и заметки необязательны.'}</p>
           </div> : <ul className="clients" aria-label={archive ? 'Клиенты в архиве' : 'Список клиентов'}>
-            {visible.map(client => <li key={client.id}>
-              <label className="pick">
-                <input type="checkbox" aria-label={`Выбрать ${nameOf(client)}`} disabled={busy}
-                  checked={selected.includes(client.id)} onChange={event => {
-                    const checked = event.target.checked;
-                    setSelected(current => checked ? [...current, client.id] : current.filter(id => id !== client.id));
-                  }} />
-              </label>
-              <button type="button" className="client" disabled={busy} onClick={() => {
-                setError(''); setNotice(''); setScreen({ kind: 'card', client });
-              }}>
-                <span><strong>{nameOf(client)}</strong>{client.phone && <small>{client.phone}</small>}</span>
-                <span aria-hidden="true">›</span>
-              </button>
-            </li>)}
+            {visible.map(client => {
+              const balance = billingBalance(client.billing);
+              return <li key={client.id}>
+                <label className="pick">
+                  <input type="checkbox" aria-label={`Выбрать ${nameOf(client)}`} disabled={busy}
+                    checked={selected.includes(client.id)} onChange={event => {
+                      const checked = event.target.checked;
+                      setSelected(current => checked ? [...current, client.id] : current.filter(id => id !== client.id));
+                    }} />
+                </label>
+                <button type="button" className="client" disabled={busy} onClick={() => {
+                  setError(''); setNotice(''); setScreen({ kind: 'card', client });
+                }}>
+                  <span><strong>{nameOf(client)}</strong>{client.phone && <small>{client.phone}</small>}
+                    {client.billing && <small>{dueStatus(client.billing, today)}</small>}
+                    {balance > 0 && <small className="debt">К доплате: {money(balance)}</small>}</span>
+                  <span aria-hidden="true">›</span>
+                </button>
+              </li>;
+            })}
           </ul>}
         </>}
       </>}
@@ -188,18 +229,37 @@ function App() {
           </label>)}
           <label>Заметки<textarea rows={4} value={fields.notes} disabled={busy}
             onChange={event => setFields({ ...fields, notes: event.target.value })} /></label>
+          {tariffs.some(tariff => tariff.enabled) ? <fieldset className="billing-fields" disabled={busy}>
+            <label>Абонемент<select aria-label="Абонемент" value={enrollment?.kind ?? ''} onChange={event => {
+              const kind = event.target.value;
+              setEnrollment(kind === 'start' || kind === 'transfer' ? initialEnrollment(kind, tariffs) : null);
+            }}><option value="">Без абонемента</option><option value="start">Оформить новый</option>
+              <option value="transfer">Перенести действующий</option></select></label>
+            {enrollment && <EnrollmentFields form={enrollment} onChange={setEnrollment} tariffs={tariffs} />}
+          </fieldset> : <small className="muted">Добавить абонемент можно позже, после настройки тарифов.</small>}
           <button className="primary" type="submit" disabled={busy}>Сохранить карточку</button>
         </form>
       </>}
 
       {screen.kind === 'card' && <>
         <h1>{nameOf(screen.client)}</h1>
-        <div className="badges"><span>Без абонемента</span>{screen.client.archived && <span>В архиве</span>}</div>
         <dl className="panel details">
           <div><dt>Телефон</dt><dd>{screen.client.phone || 'Не указан'}</dd></div>
           <div><dt>Заметки</dt><dd>{screen.client.notes || 'Нет заметок'}</dd></div>
         </dl>
+        <BillingCard key={screen.client.id} billing={screen.client.billing} archived={screen.client.archived}
+          tariffs={tariffs} today={today} busy={busy} onSave={action => write(async () => {
+            const client = await updateBilling(screen.client.id, action);
+            setClients(current => current?.map(item => item.id === client.id ? client : item) ?? null);
+            setScreen({ kind: 'card', client });
+          }, 'Изменения сохранены.')} />
       </>}
+
+      {screen.kind === 'tariffs' && <Tariffs tariffs={tariffs} busy={busy} onSave={(draft, id) => write(async () => {
+        rememberTariff(await saveTariff(draft, id));
+      }, 'Тариф сохранён.')} onToggle={tariff => void write(async () => {
+        rememberTariff(await setTariffEnabled(tariff.id, !tariff.enabled));
+      }, tariff.enabled ? 'Тариф отключён.' : 'Тариф включён.')} />}
 
       {pendingDelete.length > 0 && <DeleteDialog clients={pendingDelete} busy={busy} error={error}
         onCancel={() => { setPendingDelete([]); setError(''); }} onConfirm={remove} />}
